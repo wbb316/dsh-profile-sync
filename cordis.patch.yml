@@ -1,0 +1,9 @@
+# 把本插件插入 DSH profile 的配置树（bundle 的挂载声明）
+#
+# 注意这里**只插入自己这一行**，不写任何 config：
+# 本插件不需要配置项，而且往别人的行上写 config 会在 profile 合成时覆盖
+# 那一行的完整 config（宿主 patch 的语义是「匹配即整体替换」），
+# 那是这个生态里很容易踩的一脚。
+- insert:
+    - id: dsh-profile-sync
+      name: dsh-profile-sync

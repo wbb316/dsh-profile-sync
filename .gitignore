@@ -1,0 +1,8 @@
+# 依赖（本插件没有运行时依赖，但本地调试可能会有）
+node_modules/
+pnpm-lock.yaml
+
+# 生成的迁移产物（计划文件 / 离线脚本 / 日志）
+*.log
+_迁移计划/
+apply.cmd.bak

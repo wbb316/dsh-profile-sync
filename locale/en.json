@@ -1,0 +1,4 @@
+{
+  "title": "Plugin Migration",
+  "description": "Move plugins between dsh profiles safely: diff, preflight loader entry-id collisions, generate a script to run after the target quits, then verify on restart."
+}

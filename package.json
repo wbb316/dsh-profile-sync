@@ -1,0 +1,56 @@
+{
+  "name": "dsh-profile-sync",
+  "version": "0.1.0",
+  "description": "profile 间插件迁移：把网页版（web）profile 的插件集安全地牵引到桌面端（desktop）—— 算差异、预检、生成退出后执行的脚本、重启后核对。绝不把实例配置（端口/坐标/地址）一起抄过去。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "profile",
+    "plugin-sync",
+    "migration"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1",
+    "@deepseek-ai/dsh-host-webserver": ">=0.2.0-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.2.0-rc.1"
+  },
+  "meta": {
+    "title": "插件迁移",
+    "description": "在 dsh 的各个 profile 之间安全迁移插件：算差异、预检 entry id 撞车、生成退出后执行的脚本、重启后核对是否真的落地。"
+  },
+  "icon": "./icon.svg",
+  "files": [
+    "lib",
+    "bin",
+    "locale",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.0-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  }
+}
