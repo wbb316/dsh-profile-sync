@@ -33,6 +33,7 @@
  */
 
 import fs from 'node:fs'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -90,7 +91,11 @@ if (args.help === true) {
 
 const pluginDir = path.resolve(typeof args['plugin-dir'] === 'string' ? args['plugin-dir'] : PLUGIN_DIR)
 const profile = typeof args.profile === 'string' ? args.profile : 'dshpsverify'
-const port = typeof args.port === 'string' ? Number(args.port) : 3080
+// 端口：**默认自动挑一个空闲的**，因为 Windows 的 SO_REUSEADDR 允许两个进程绑同一端口 ——
+// 早先这里默认 3080，于是在用户正用着网页版（3080）时，验证器和他的应用抢了同一个端口。
+// 显式 --port 时按他的意思来，但会先确认那个端口确实空着。
+let port = typeof args.port === 'string' ? Number(args.port) : null
+const portExplicit = port !== null
 const expectText = typeof args.expect === 'string' ? args.expect : '插件迁移'
 const timeoutSec = typeof args['timeout-sec'] === 'string' ? Number(args['timeout-sec']) : 25
 const keep = args.keep === true
@@ -111,7 +116,7 @@ if (!/^[a-z0-9][a-z0-9._-]*$/i.test(profile)) {
 if (!fs.existsSync(path.join(pluginDir, 'package.json'))) {
   fail(2, `插件目录里没有 package.json：${pluginDir}`)
 }
-if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+if (portExplicit && (!Number.isInteger(port) || port <= 0 || port > 65535)) {
   fail(2, `端口不合法：${args.port}`)
 }
 
@@ -214,6 +219,43 @@ async function waitForHttp(url, deadlineMs) {
 }
 
 /**
+ * 挑一个空闲端口。
+ *
+ * 为什么要这么麻烦：页面在 3080 上时，验证器早先也去绑 3080 —— 而 Windows 的
+ * SO_REUSEADDR 允许两个进程绑同一端口，于是**验证器和用户正在用的应用抢了同一个端口**
+ * （实测发生过一次）。挑个空闲端口 + 用 patch overlay 把它写进一次性 profile 的
+ * webserver 配置，就能彻底避开这件事。
+ */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer()
+    probe.once('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const picked = probe.address().port
+      probe.close(() => resolve(picked))
+    })
+  })
+}
+
+/** 让一次性 profile 的 webserver 绑到指定端口的 overlay。 */
+function writePortOverlay(file, wanted) {
+  fs.writeFileSync(
+    file,
+    [
+      '# 由 dsh-profile-sync 的验证器临时生成：把 webserver 绑到空闲端口，',
+      '# 免得它和用户正在用的 dsh 应用抢同一个端口。',
+      '- id: webserver',
+      "  name: '@deepseek-ai/dsh-host-webserver'",
+      '  config:',
+      "    host: '127.0.0.1'",
+      `    port: ${wanted}`,
+      '',
+    ].join('\n')
+  )
+  return file
+}
+
+/**
  * 抓页面真实 DOM。
  *
  * 这里有两个**实测出来的坑**，别改回去：
@@ -274,6 +316,7 @@ function dumpDom(userDataDir) {
 let server = null
 let userDataDir = null
 let url = null
+let overlayFile = null
 
 const cleanup = () => {
   if (server !== null && server.exitCode === null && server.signalCode === null) {
@@ -288,6 +331,13 @@ const cleanup = () => {
       fs.rmSync(profileDir, { recursive: true, force: true })
     } catch {
       /* Windows 上偶尔被占 */
+    }
+    if (overlayFile !== null) {
+      try {
+        fs.rmSync(overlayFile, { force: true })
+      } catch {
+        /* 同上 */
+      }
     }
     if (userDataDir !== null) {
       try {
@@ -305,7 +355,18 @@ try {
   console.log(`一次性 profile：${profileDir}`)
   console.log(`dsh：${dshBin}`)
   console.log(`浏览器：${browser}`)
-  console.log(`端口：${port}`)
+  console.log('')
+
+  // 0) 先把端口定下来并写 overlay —— 见 freePort() 的注释：绝不和用户正在用的应用抢端口。
+  if (portExplicit) {
+    if (await waitForHttp(`http://127.0.0.1:${port}/`, 1500)) {
+      fail(2, `端口 ${port} 上已经有东西在跑（可能就是你正在用的 dsh 应用）。去掉 --port 让它自己挑一个空闲端口。`)
+    }
+  } else {
+    port = await freePort()
+  }
+  overlayFile = writePortOverlay(path.join(os.tmpdir(), `dshps-overlay-${process.pid}.yml`), port)
+  console.log(`端口：${port}${portExplicit ? '（你指定的）' : '（自动挑的空闲端口）'}，overlay：${overlayFile}`)
   console.log('')
 
   // 1) 建一个干净的一次性 profile（从 web 模板）
@@ -325,7 +386,7 @@ try {
   console.log(`✓ 已装入：${spec}`)
 
   // 3) 起服务（--no-open：绝不许弹用户的浏览器）
-  server = spawn(process.execPath, [dshBin, '--profile', profile, '--no-open'], {
+  server = spawn(process.execPath, [dshBin, '--profile', profile, '--patch', overlayFile, '--no-open'], {
     cwd: os.tmpdir(),
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],

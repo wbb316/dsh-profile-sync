@@ -12,7 +12,8 @@
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 
-import { API_ROUTES, buildProfileSyncTool, listProfiles, registerApi } from './lib/index.js'
+import { API_ROUTES, buildProfileSyncTool, canApplyInApp, listProfiles, registerApi } from './lib/index.js'
+import { currentProfileFromEnv } from './lib/plan.js'
 
 let passed = 0
 let failed = 0
@@ -147,6 +148,43 @@ await test('POST /write：真的写出 plan.json + plan.txt + apply.cmd', async 
 
   // 清掉这次测试产物，别在用户机器上留垃圾
   fs.rmSync(out.json.dir, { recursive: true, force: true })
+})
+
+await test('canApplyInApp：规则是「目标就是当前 profile」，与 profile 叫什么名字无关', () => {
+  // 这条曾经写死成 === 'desktop'，于是网页版没法当场生效。
+  // 实测网页版也暴露同一套 /api/plugin-manager，所以放宽成通用规则。
+  assert.equal(canApplyInApp('desktop', 'desktop'), true, '桌面端写自己')
+  assert.equal(canApplyInApp('web', 'web'), true, '网页版写自己 —— 这正是放宽后新获得的能力')
+  assert.equal(canApplyInApp('web', 'desktop'), false, '管理器只写自己所属的 profile')
+  assert.equal(canApplyInApp('desktop', 'web'), false, '反过来也一样')
+  assert.equal(canApplyInApp('Web', ' web '), true, '大小写与空白要容忍')
+  assert.equal(canApplyInApp('', 'web'), false)
+  assert.equal(canApplyInApp(undefined, 'web'), false)
+  assert.equal(canApplyInApp('web', ''), false)
+  // 不传 current 时取环境里的 DSH_PROFILE；测试进程里通常没有，落到 fallback
+  assert.equal(typeof canApplyInApp('web'), 'boolean')
+})
+
+await test('currentProfileFromEnv：认不出当前 profile 时必须 null，绝不猜 desktop', () => {
+  // 这条对应一个**真发生过的静默错误**：宿主进程的环境里没有 DSH_PROFILE
+  // （它只被注入给 shell），于是写死的 ?? 'desktop' 让网页版把自己认成 desktop，
+  // 默认目标变成 desktop，还对着错误的一对 profile 报「已经一致」。
+  assert.equal(currentProfileFromEnv({ DSH_PROFILE: 'web' }), 'web')
+  assert.equal(currentProfileFromEnv({ DSH_PROFILE: ' web ' }), 'web', '两侧空白要容忍')
+  assert.equal(currentProfileFromEnv({ DSH_PROFILE_DIR: 'C:\\Users\\x\\.dsh\\profiles\\web' }), 'web', 'DIR 的 basename 是可靠来源')
+  assert.equal(
+    currentProfileFromEnv({ DSH_PROFILE: 'desktop', DSH_PROFILE_DIR: 'C:\\x\\profiles\\web' }),
+    'desktop',
+    'DSH_PROFILE 优先于 DIR'
+  )
+  assert.equal(currentProfileFromEnv({}), null, '**认不出就必须 null** —— 猜 desktop 会让网页版算错目标')
+  assert.equal(currentProfileFromEnv({ DSH_PROFILE: '   ' }), null)
+  assert.equal(currentProfileFromEnv({ DSH_PROFILE_DIR: '' }), null)
+  assert.equal(
+    currentProfileFromEnv({ DSH_PROFILE_DIR: 'C:\\Users\\x\\.dsh\\profiles' }),
+    null,
+    'profiles 目录本身不是一个 profile 名'
+  )
 })
 
 await test('registerApi：挂 4 条；webServer 缺失时返回 0 而不是抛错', () => {
