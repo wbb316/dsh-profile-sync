@@ -1,19 +1,25 @@
 # dsh-profile-sync
 
-在 dsh 的各个 **profile** 之间安全迁移插件。默认方向是 **网页版 `web` → 桌面版 `desktop`**。
+在 dsh 的各个 **profile** 之间迁移插件。默认方向是 **网页版 `web` → 桌面版 `desktop`**。
 
-这个插件的形状是刻意的：**它自己不改任何 profile**。它只做四件事 ——
-算差异、预检、写一个「退出后执行的脚本」、**重启后核对是否真的落地**。
-真正的安装交给官方通道 `dsh plugin --profile <p> install`。
+它的定位很窄：**自己不装任何东西**。它只做四件事 —— 算差异、预检、写一个「退出后执行的脚本」、
+下次启动后核对是否真的落地；真正的安装交给官方通道（桌面端走应用内管理器，其它 profile 走 `dsh plugin`）。
+
+装完的效果：左侧栏多一个「插件迁移」面板 —— 选源/目标 → 算差异 → 生成执行脚本 → 核对上次迁移。
 
 ---
 
-## 为什么不能真的做到「一键粘贴」
+## 两条写入路径（以及为什么不是"一键"）
 
-这不是保守，是这套系统里的三个硬事实：
+dsh 里改一个 profile 有两条合法路径，取决于那个 profile 归谁管：
 
-**1. 桌面端 profile 禁止用 `dsh` CLI 修改 —— 这是硬拦，不是"要先退出"。**
-`@deepseek-ai/dsh/lib/bin.js` 里有一条按名字拦死一切 CLI 调用的守卫：
+| 目标 profile | 谁有权写 | 走哪条 | 应用时机 |
+|---|---|---|---|
+| `desktop`（归桌面应用管） | 应用内的官方插件管理器 | `installBundle`（cordis 服务 `pluginManager`，就是「设置 → 插件」用的那个） | **当场生效**，不用退出 |
+| `web` / `headless`（归 CLI 管） | `dsh` CLI | `dsh plugin --profile <p> install`，或用本插件生成的离线脚本 | 目标端**退出后** |
+
+**桌面端 profile 禁止用 CLI 改 —— 这是硬拦，不是"要先退出"。**
+`@deepseek-ai/dsh/lib/bin.js` 里有一条按名字拦住一切 CLI 调用的守卫：
 
 ```js
 function rejectElectronProfile(program, profile) {
@@ -22,42 +28,36 @@ function rejectElectronProfile(program, profile) {
 }
 ```
 
-它对**所有** CLI 调用生效，连 `dsh --profile desktop --dump-config` 都被拒。
-dshmarket 的源码里有一行注释写着同一件事：
-「Never fall back to `dsh plugin --profile desktop`: that CLI is forbidden.」
+它对**所有** CLI 调用生效，连 `dsh --profile desktop --dump-config` 都会被拒
+（dshmarket 源码里也留着同一句注释：*Never fall back to `dsh plugin --profile desktop`: that CLI is forbidden.*）。
 
-所以桌面端唯一的写入器是**应用内的官方插件管理器**（cordis 服务 `pluginManager`，
-也就是「设置 → 插件」页面用的那个）。本插件因此有两条应用路径：
+所以桌面端这一侧，本插件只调用官方管理器：改 `dependencies`、注册 `dsh.profile.bundles`、
+跑兼容性校验、失败回滚都由它负责 —— 本插件不自己写 manifest。命令行的 `plan` / `apply`
+是给 `web` / `headless` 这类由 CLI 拥有的 profile 用的。
 
-| 目标 profile | 走哪条 | 应用时机 |
-|---|---|---|
-| `desktop`（app 自有） | 应用内官方管理器 `installBundle` | **当场生效**，无需退出 |
-| `web` / `headless`（CLI 拥有） | `dsh plugin` 或生成的离线脚本 | 目标端退出后 |
+## 要搬的不是 `node_modules`，是五样东西
 
-（`installBundle` 自己负责改 `dependencies`、注册 `dsh.profile.bundles`、
-跑兼容性校验、失败回滚 —— 所以走这条路时本插件**不自己写 manifest**，
-写了只会跟它打架。）
+少一样就会**静默**失效：
 
-**2. 要同步的不是 `node_modules`，是五样东西，少一样就静默失效。**
-
-| 要搬的 | 漏掉/搬错的后果 |
+| 要搬的 | 漏掉 / 搬错的后果 |
 |---|---|
-| `package.json` 的 `dependencies` | 包不在，加载失败 |
-| `package.json` 的 `dsh.profile.bundles` | **包装了但永远不加载，而且不报错** —— 最阴的失败 |
-| `pnpm-workspace.yaml` 的 `allowBuilds` | pnpm 静默跳过原生构建（`node-pty` 的 `conpty.dll` 铺不出来） |
-| `compatibility.json` 的精确版本豁免 | 目标核心不认识该插件时只给你一句看不懂的拒绝 |
-| `cordis.patch.yml` | **故意不同步**，见下条 |
+| `package.json` 的 `dependencies` | 包装不上，加载失败 |
+| `package.json` 的 `dsh.profile.bundles` | **包装了但永远不会加载，而且不报错** —— 最阴的一种失败 |
+| `pnpm-workspace.yaml` 的 `allowBuilds` | pnpm 静默跳过原生构建（比如 `node-pty` 的 `conpty.dll` 铺不出来） |
+| `compatibility.json` 里的精确版本豁免 | 目标核心不认识该插件时，只给你一句看不懂的拒绝 |
+| `cordis.patch.yml` | **故意不同步**，见下 |
 
-**3. `cordis.patch.yml` 里的东西是实例配置，不是插件配置。**
-里面有端口（web 绑 `3080`、桌面端绑 `19387`）、宠物坐标、`remote-web-ui` 的
-Tailscale 地址。整份抄过去直接端口冲突。所以本插件**只把差异列出来给你看**，
-一个字节都不写。
+## 故意不同步的那一份：`cordis.patch.yml`
+
+里面装的是**实例配置**，不是插件配置：端口（web 绑 `3080`、桌面端绑 `19387`）、宠物坐标、
+`remote-web-ui` 的 Tailscale 地址。整份抄过去会直接端口冲突。
+所以本插件只把差异列出来给你看，一个字节都不写 —— 这是设计，不是没做完。
 
 ---
 
 ## 安装
 
-**桌面端不需要退出 —— 恰恰相反，它必须在运行。**
+**桌面端不用退出 —— 恰恰相反，它必须在运行**（要调用的那个官方管理器就在应用里面）：
 
 ```
 1. 打开 DeepSeek Harness（正在运行就对了）
@@ -66,37 +66,31 @@ Tailscale 地址。整份抄过去直接端口冲突。所以本插件**只把�
 ```
 
 `install.cmd` 做的事：装前自检 → 确认官方的 `/api/plugin-manager` 端点在跑 →
-把 `link:<本目录>` 提交给**应用内的官方插件管理器** → 轮询到包真的出现在已装列表里才算成功。
+把 `link:<本目录>` 提交给应用内的官方管理器 → 轮询到包真的出现在已装列表里才算成功。
 
-这条路是桌面端**唯一**合法的写入器（CLI 被按名字禁止，见上）。官方管理器自己负责
-改 `package.json`、注册 `dsh.profile.bundles`、跑兼容性校验、失败回滚 ——
-所以本插件不自己写 manifest，写了只会跟它打架。
+宿主半装完**通过 HMR 当场生效**（工具立即可用）；左侧栏面板刷新页面即可。
 
-宿主半装完会**通过 HMR 当场生效**（工具立即可用）；左侧栏面板刷新页面即可。
+需要 **Node.js 20+ 在 PATH 上**。`install.cmd` / `sync-plan.cmd` / 生成的 `apply.cmd`
+都会自己找 node，找不到就明确报错退出 —— 不会退回去执行桌面端 exe（原因见「修过的 bug」第 1 条）。
 
-### 装前自检（为什么它很重要）
+**不装插件也能先看效果**：`bin/plan-cli.mjs` 完全独立，不依赖 DSH 在跑 ——
+现在就可以双击 `sync-plan.cmd` 看一份真实的差异报告。
 
-`install.cmd` **在调官方通道之前**会先跑一次自检（`node bin/check.mjs`）：
+### 装前自检（`node bin/check.mjs`）
 
-- **清单不变式**：`package.json` 的 `name`、`cordis.patch.yml` 里的挂载名、
-  客户端 loader 的 `id` **三者必须一致**；`dsh.client.inject` 必须和客户端代码里的
-  `inject` 一致（前者写**包名**，后者写**服务名**，写混是这个生态的经典错误）。
+`install.cmd` 在调官方通道**之前**会先跑一次自检：
+
+- **清单不变式**：`package.json` 的 `name`、`cordis.patch.yml` 里的挂载名、客户端 loader 的 `id`
+  三者必须一致；`dsh.client.inject` 必须和客户端代码里的 `inject` 一致
+  （前者写**包名**、后者写**服务名**，写混是这个生态的经典错误）。
 - **真加载**：真的 `import` 一次宿主半和客户端半，确认 `apply` 导出了、
   客户端半确实按模块加载器契约注册了自己。**语法对 ≠ 加载得起来** ——
   顶层 import 一个不存在的相对路径就能骗过 `--check`。
 
-挡的是最坏的失败模式：bundle 被写进 `dsh.profile.bundles` 却加载不起来 →
-profile 组装失败 → **桌面端连窗口都打不开**，而那时候你已经在应用外面了，
-只能用文本编辑器改 `package.json` 才救得回来。
+挡的是最坏的失败模式：bundle 被写进 `dsh.profile.bundles` 却加载不起来 → profile 组装失败 →
+**桌面端连窗口都打不开**，而那时候你已经在应用外面了，只能用文本编辑器改 `package.json` 才救得回来。
 
 自检不通过会**拒绝安装**（退出码 1），不会硬着头皮往下走。
-
-需要 **Node.js 20+ 在 PATH 上**。
-`install.cmd` / `sync-plan.cmd` / 生成的 `apply.cmd` 都会自己找 node，
-找不到就明确报错退出 —— **不会**退回去执行桌面端 exe（见下面那条坑）。
-
-**装插件之前也能用**：`bin/plan-cli.mjs` 是完全独立的，不依赖 DSH 在跑。
-现在就可以双击 `sync-plan.cmd` 看一份真实的差异报告。
 
 ---
 
@@ -106,7 +100,7 @@ profile 组装失败 → **桌面端连窗口都打不开**，而那时候你已
 
 | 文件 | 作用 |
 |---|---|
-| `install.cmd` | 装前自检 + 把本插件装进 profile（需先退出桌面端） |
+| `install.cmd` | 装前自检 + 把本插件装进 profile（桌面端要在运行状态） |
 | `sync-plan.cmd` | 算差异并生成计划 + `apply.cmd` |
 
 ### 命令行
@@ -191,10 +185,10 @@ bundle 新增 / allowBuilds 新增 / 阻断 / 提醒」的分项摘要。
 
 ## 钉法不同 ≠ 版本变更
 
-这台机器上桌面端是**故意**把版本钉成精确号的（`0.11.3`），网页端用的是范围号
-（`^0.11.3`）。两者指向同一个版本，只是钉的松紧不同。
+有些 profile 是**故意**把版本钉成精确号的（例如桌面端 `0.11.3`），另一些用范围号
+（例如网页端 `^0.11.3`）。两者指向同一个版本，只是钉的松紧不同。
 
-朴素 diff 会把它当成「变更」并覆盖掉桌面端那个加固。所以本工具单独归一类
+朴素 diff 会把它当成「变更」，从而覆盖掉目标端那个加固。所以本插件单独归一类
 `repin`，**只报告、默认不动**。
 
 ## 执行顺序（以及为什么是这个顺序）
@@ -251,7 +245,7 @@ node test-managed.mjs      # 15 项：官方管理器解析、进程内应用、
 
 ### 客户端启动验证（`bin/verify-client.mjs`）
 
-上面那些测试**碰不到客户端启动审计** —— 而这正是我踩过的坑：宿主半装载成功、
+上面那些测试**碰不到客户端启动审计** —— 而这正是一个踩过的坑：宿主半装载成功、
 日志一切正常，客户端那一半却是死的，桌面端直接打不开窗口。
 
 ```bash
@@ -298,7 +292,7 @@ link 装入目标插件 → 起服务（**加 `--no-open`，绝不许弹用户�
 
 - **不自动同步配置层**。`cordis.patch.yml` 只报告差异，这是设计，不是没做完。
 - **默认不删目标端多出来的依赖**（只报告）；要删得显式 `--prune`。
-- **兼容性判断以官方为准**。本工具的引擎检查是建议性的，读不到运行时版本时说「不知道」。
+- **兼容性判断以官方为准**。本插件的引擎检查是建议性的，读不到运行时版本时说「不知道」。
 - **不支持显式目录形式的 profile**。`dsh plugin --profile` 按 profile 名解析目录，
   所以 `apply` 会拒绝目标目录不等于 `profiles/<名字>` 的情况。
 - **`allowBuilds` 的 YAML 处理是抄 `dshmarket` 的**（CRLF、作用域包名要加引号、
