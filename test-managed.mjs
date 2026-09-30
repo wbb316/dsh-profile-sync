@@ -19,6 +19,7 @@ import {
   managedSpec,
   managedSpecs,
   profilePort,
+  profilePortInfo,
   resolvePluginManager,
 } from './lib/managed.js'
 import { profilesRoot } from './lib/plan.js'
@@ -172,9 +173,64 @@ await test('applyManaged：没有管理器就抛错（不许偷偷退回 CLI）'
 
 console.log('\n端口读取')
 
-await test('profilePort：真实 profile 能读出端口，不存在的返回 null', () => {
-  assert.equal(profilePort(path.join(profilesRoot(), 'desktop')), 19387)
+await test('profilePort：旧签名只是薄包装，不存在的目录返回 null', () => {
+  const desktopDir = path.join(profilesRoot(), 'desktop')
+  // 这里**不断言「这台机器一定读得到 19387」**：没带 DSH_WEB_URL、patch 里也没写
+  // port 的环境（另一套安装就是）读不到才是正确结果。只断言旧签名与新函数一致。
+  assert.equal(profilePort(desktopDir), profilePortInfo(desktopDir, 'desktop').port)
   assert.equal(profilePort(path.join(profilesRoot(), 'definitely-not-here')), null)
+})
+
+await test('profilePortInfo：三档来源按权威性排序，且读不到时**不猜**', () => {
+  // 端口现在的归属是**启动参数**（桌面端宿主 --port 19387；web 走 bundle 层
+  // `ctx.webStartup.port ?? 3080`）。所以「当前 profile」这一档必须优先 ——
+  // 只有它能正确处理 --port 0（操作系统随机端口）和用户自定义端口。
+  const saved = {
+    dir: process.env.DSH_PROFILE_DIR,
+    name: process.env.DSH_PROFILE,
+    url: process.env.DSH_WEB_URL,
+  }
+  const restore = () => {
+    if (saved.dir === undefined) delete process.env.DSH_PROFILE_DIR
+    else process.env.DSH_PROFILE_DIR = saved.dir
+    if (saved.name === undefined) delete process.env.DSH_PROFILE
+    else process.env.DSH_PROFILE = saved.name
+    if (saved.url === undefined) delete process.env.DSH_WEB_URL
+    else process.env.DSH_WEB_URL = saved.url
+  }
+  try {
+    const desktopDir = path.join(profilesRoot(), 'desktop')
+
+    // 第 1 档：当前 profile + DSH_WEB_URL（即使它自己的 patch 里写的是别的端口）
+    process.env.DSH_PROFILE_DIR = desktopDir
+    process.env.DSH_PROFILE = 'desktop'
+    process.env.DSH_WEB_URL = 'http://127.0.0.1:19999'
+    const runtime = profilePortInfo(desktopDir, 'desktop')
+    assert.equal(runtime.port, 19999)
+    assert.match(runtime.source, /DSH_WEB_URL/)
+    // 换成随机端口也必须跟得上（--port 0 场景）
+    process.env.DSH_WEB_URL = 'http://127.0.0.1:54321'
+    assert.equal(profilePortInfo(desktopDir, 'desktop').port, 54321)
+
+    // 第 2 档：不是当前 profile → 读它自己的 patch
+    process.env.DSH_PROFILE = 'somewhere-else'
+    process.env.DSH_PROFILE_DIR = path.join(profilesRoot(), 'somewhere-else')
+    const viaPatch = profilePortInfo(path.join(profilesRoot(), 'web'), 'web')
+    assert.equal(viaPatch.port, 3080)
+    assert.match(viaPatch.source, /cordis\.patch\.yml/)
+
+    // 第 3 档：web 的出厂默认（目录不存在、名字叫 web）
+    const shipped = profilePortInfo(path.join(profilesRoot(), 'no-such-profile-dir'), 'web')
+    assert.equal(shipped.port, 3080)
+    assert.match(shipped.source, /出厂默认/)
+
+    // 都不成立 → null + 说明原因（**不猜**：猜错会把安装请求发到别的进程上）
+    const none = profilePortInfo(path.join(profilesRoot(), 'no-such-profile-dir'), 'not-web')
+    assert.equal(none.port, null)
+    assert.match(none.source, /读不到/)
+  } finally {
+    restore()
+  }
 })
 
 console.log('\nHTTP 端点通道（本地假服务器真跑）')

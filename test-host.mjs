@@ -10,10 +10,21 @@
  */
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
 import { Readable } from 'node:stream'
 
 import { API_ROUTES, buildProfileSyncTool, canApplyInApp, listProfiles, registerApi } from './lib/index.js'
-import { currentProfileFromEnv } from './lib/plan.js'
+import { currentProfileFromEnv, INBOX_BUNDLES, profilesRoot } from './lib/plan.js'
+
+/** 一个 profile 的社区依赖名（滤掉 in-box），排序。 */
+function communityDepNames(profileName) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(profilesRoot(), profileName, 'package.json'), 'utf8'))
+  const inbox = new Set(INBOX_BUNDLES)
+  return Object.keys(manifest.dependencies ?? {})
+    .filter((name) => !inbox.has(name))
+    .sort()
+}
 
 let passed = 0
 let failed = 0
@@ -88,10 +99,21 @@ await test('GET /profiles：列出本机 profile，且标出当前那个', async
   assert.ok(names.includes('web'), `应当列出 web，实际：${names}`)
   assert.ok(names.includes('desktop'), `应当列出 desktop，实际：${names}`)
   assert.equal(out.json.profiles.filter((p) => p.current).length, 1, '当前 profile 恰好一个')
+  // 端口：**不假设「这台机器读得到」**，只断言「值与来源自洽」。
+  // 端口现在的归属是启动参数，所以一个既没有 DSH_WEB_URL、patch 里也没写 port 的环境
+  // 读不到就是正确结果 —— 那是环境事实，不是失败。
+  for (const p of out.json.profiles) {
+    assert.equal(typeof p.portSource, 'string', `${p.name} 必须给出端口来源说明`)
+    assert.ok(p.portSource !== '', `${p.name} 的 portSource 不能为空`)
+    if (p.port === null) {
+      assert.match(p.portSource, /读不到/, `${p.name} 读不到端口时必须说明原因`)
+    } else {
+      assert.ok(Number.isInteger(p.port) && p.port > 0, `${p.name} 的端口要么是正整数、要么是 null`)
+    }
+  }
+  // web 一定有结论：patch 里有 port: 就用它，没有就走 web 的出厂默认 3080
   const web = out.json.profiles.find((p) => p.name === 'web')
-  assert.equal(web.port, 3080, 'web 的端口应从 patch 里读出来')
-  const desktop = out.json.profiles.find((p) => p.name === 'desktop')
-  assert.equal(desktop.port, 19387)
+  assert.ok(Number.isInteger(web.port) && web.port > 0, 'web 必须能定出端口（patch 或出厂默认）')
 })
 
 await test('GET /plan：web → desktop 算出计划并给文本', async () => {
@@ -103,8 +125,13 @@ await test('GET /plan：web → desktop 算出计划并给文本', async () => {
   assert.ok(out.json.plan, '要有 plan 对象')
   assert.equal(out.json.plan.target.name, 'desktop')
   assert.match(out.json.text, /迁移计划：web → desktop/)
-  // 两边当前是同一套插件 —— 不该冒出「新增依赖」
-  assert.equal(out.json.plan.add.length, 0)
+  // 不写死「已迁完」：断言 add 恰好是「源侧有、目标侧没有」的那些
+  const targetDeps = new Set(communityDepNames('desktop'))
+  assert.deepEqual(
+    out.json.plan.add.map((e) => e.name).sort(),
+    communityDepNames('web').filter((name) => !targetDeps.has(name)),
+    'add 必须等于两份真实 manifest 之差'
+  )
 })
 
 await test('GET /plan：同一个 profile 当源和目标 → 阻断', async () => {

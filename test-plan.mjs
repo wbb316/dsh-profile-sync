@@ -16,10 +16,12 @@ import assert from 'node:assert/strict'
 import {
   advisoryEngineCheck,
   computePlan,
+  INBOX_BUNDLES,
   localSpecPath,
   mergeAllowBuildsText,
   parseAllowBuilds,
   parsePatchInsertedIds,
+  profilesRoot,
   registryVersionCore,
   renderPlanText,
   specKind,
@@ -96,6 +98,21 @@ test('mergeAllowBuildsText：已经坏成两个块的会被合并成一个（顺
   assert.equal((out.text.match(/allowBuilds:/g) || []).length, 1)
   const map = parseAllowBuilds(out.text)
   assert.deepEqual(Object.keys(map).sort(), ['a', 'b', 'c'])
+})
+
+test('mergeAllowBuildsText：新增的键沿用源侧的值，不能一律写 true', () => {
+  // 源侧显式写 false 是「有意关掉这个原生构建」，
+  // 一律写 true 会在目标侧把它打开 —— 语义反转且不报错。
+  const out = mergeAllowBuildsText('', ['node-pty', 'cloudflared'], {
+    'node-pty': 'false',
+    cloudflared: 'true',
+  })
+  const map = parseAllowBuilds(out.text)
+  assert.equal(map['node-pty'], 'false', '源侧 false 必须原样带过去')
+  assert.equal(map.cloudflared, 'true')
+  // 不给 values 时仍退回 true（向后兼容）
+  const fallback = parseAllowBuilds(mergeAllowBuildsText('', ['x']).text)
+  assert.equal(fallback.x, 'true')
 })
 
 test('parsePatchInsertedIds：只认 insert 块里的 id，别人的配置行不算（#147）', () => {
@@ -292,14 +309,44 @@ test('没有可加载入口的包 → 阻断（否则提升进 bundle 层会炸�
 // ─────────────────────── C. 真实 profile ───────────────────────
 console.log('\nC. 真实 profile（这台机器上的 web → desktop）')
 
-test('对真实 web/desktop 算一遍计划并打印', () => {
+/** 一个 profile 的社区依赖名（滤掉 in-box），排序。 */
+function communityDepNames(profileName) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(profilesRoot(), profileName, 'package.json'), 'utf8'))
+  const inbox = new Set(INBOX_BUNDLES)
+  return Object.keys(manifest.dependencies ?? {})
+    .filter((name) => !inbox.has(name))
+    .sort()
+}
+
+test('对真实 web/desktop 算一遍计划并打印（断言与真实 manifest 一致，不依赖「已迁完」）', () => {
   const plan = computePlan({ source: 'web', target: 'desktop' })
   console.log('\n' + renderPlanText(plan).split('\n').map((l) => '      ' + l).join('\n') + '\n')
-  assert.ok(Array.isArray(plan.add))
-  assert.ok(Array.isArray(plan.repin))
-  // 两边目前是同一套插件：不该冒出「新增依赖」这种结论
-  assert.equal(plan.add.length, 0, 'web 与 desktop 当前应当没有新增依赖')
-  assert.equal(plan.change.length, 0, 'web 与 desktop 当前应当没有实质版本变更')
+
+  // 关键：断言的是**不变量**，不是「这台机器已经迁完」。
+  // 早先这里写死 `plan.add.length === 0`，在一台还没迁的机器上必然红 ——
+  // 而那种红会诱使人把断言改成通过，于是丢掉「计划必须等于两份真实 manifest 之差」
+  // 这个真正该守的性质。另一套安装上跑测试时正是这么红的（新增 3）。
+  const sourceDeps = communityDepNames('web')
+  const targetDeps = new Set(communityDepNames('desktop'))
+
+  assert.deepEqual(
+    plan.add.map((e) => e.name).sort(),
+    sourceDeps.filter((name) => !targetDeps.has(name)),
+    'add 必须恰好是「源侧有、目标侧没有」的那些'
+  )
+
+  // 每个源侧社区依赖恰好落进一个桶：add / change / repin / same，不重不漏
+  const buckets = [
+    ...plan.add.map((e) => e.name),
+    ...plan.change.map((e) => e.name),
+    ...plan.repin.map((e) => e.name),
+    ...plan.same.map((e) => e.name),
+  ]
+  assert.equal(buckets.length, new Set(buckets).size, '一个依赖不能同时落进两个桶')
+  assert.deepEqual([...new Set(buckets)].sort(), sourceDeps, '源侧每个社区依赖都要有归宿')
+
+  // ok 与 blockers 自洽
+  assert.equal(plan.ok, plan.blockers.length === 0)
 })
 
 // ─────────────────────────── 汇总 ───────────────────────────

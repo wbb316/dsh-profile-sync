@@ -191,6 +191,35 @@ bundle 新增 / allowBuilds 新增 / 阻断 / 提醒」的分项摘要。
 朴素 diff 会把它当成「变更」，从而覆盖掉目标端那个加固。所以本插件单独归一类
 `repin`，**只报告、默认不动**。
 
+## `allowBuilds` 连值一起搬，且不会把 `false` 翻成 `true`
+
+`pnpm-workspace.yaml` 的 `allowBuilds` 里，**值本身是有语义的**：显式写 `false` 是
+「有意关掉这个包的原生构建脚本」（有的 profile 就是靠这个把 cloudflared / node-pty /
+ssh2 / cpu-features 的构建默认关着）。
+
+所以同步时：
+
+- **新增键沿用源侧的值** —— 源侧 `node-pty: false` 就搬成 `false`，不会一律写 `true`
+  把人家有意关掉的东西静默打开。
+- **两边都有但值不同** → 归入 `valueMismatch`，**只报告、不自动改**（目标侧可能是
+  故意的，跟 `repin` 同一个道理）。
+- 拼写与引号规则沿用 dshmarket 那套（作用域包名要加引号、CRLF 要保住、已经坏成两个
+  `allowBuilds:` 块的会合并成一个）。
+
+## 面板上的端口是怎么读出来的
+
+端口**不在 profile 的 `cordis.patch.yml` 里** —— 它现在的归属是启动参数
+（`@deepseek-ai/dsh-web-app` 的 `port: !!js ctx.webStartup.port ?? 3080`；桌面端宿主则把
+`19387` 硬编码在它的启动参数里）。所以 `profilePortInfo()` 按权威性分三档：
+
+1. **当前 profile** → 用 `DSH_WEB_URL` 解析（对 `--port 0` 的随机端口也准）；
+2. **该 profile 自己的** `cordis.patch.yml` 里的 `port:`（旧版本 DSH 或用户手写的场景）；
+3. **只有名字是 `web` 的 profile** 才退回出厂默认 `3080`（因为它可能被 `--port` 覆盖，
+   所以面板会把来源一并标出来）。
+
+其它 profile 读不到就老实返回 `null` 并说明原因 —— 不给所有 profile 都套一个 `3080`，
+那样只会把请求发到错误的进程上。
+
 ## 执行顺序（以及为什么是这个顺序）
 
 ```
