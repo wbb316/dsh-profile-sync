@@ -10,6 +10,8 @@
  */
 
 import http from 'node:http'
+import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import assert from 'node:assert/strict'
 
@@ -18,6 +20,7 @@ import {
   installViaEndpoint,
   managedSpec,
   managedSpecs,
+  prepareAllowBuilds,
   profilePort,
   profilePortInfo,
   resolvePluginManager,
@@ -169,6 +172,114 @@ await test('applyManaged：没有管理器就抛错（不许偷偷退回 CLI）'
   }
   assert.ok(threw !== null)
   assert.match(String(threw.message), /不能退回 CLI/)
+})
+
+console.log('\nallowBuilds（受管路径也必须补，且必须在 install 之前）')
+
+/** 造一个只含最小内容的临时 profile 目录。 */
+function tempProfile(workspaceText) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshps-allow-'))
+  if (workspaceText !== null) fs.writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), workspaceText)
+  return dir
+}
+
+await test('prepareAllowBuilds：合并缺的键，保留已有键与其余内容', () => {
+  const dir = tempProfile('packages:\n  - .\n\nallowBuilds:\n  cloudflared: true\n')
+  try {
+    const file = path.join(dir, 'pnpm-workspace.yaml')
+    const build = prepareAllowBuilds({
+      target: { dir },
+      allowBuilds: { add: ['node-pty'], addValues: { 'node-pty': 'false' } },
+    })
+    assert.deepEqual(build.added, ['node-pty'])
+    const text = fs.readFileSync(file, 'utf8')
+    assert.equal((text.match(/allowBuilds:/g) || []).length, 1, '不能写出第二个 allowBuilds 块（那是非法 YAML）')
+    assert.match(text, /cloudflared: true/, '已有的键不能被动')
+    assert.match(text, /node-pty: false/, '新增键必须沿用源侧的值，不能一律写 true')
+    assert.match(text, /packages:/, '文件其余内容必须原样保留')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await test('prepareAllowBuilds：幂等 —— 已经有的键不再算新增', () => {
+  const dir = tempProfile('allowBuilds:\n  node-pty: true\n')
+  try {
+    const build = prepareAllowBuilds({ target: { dir }, allowBuilds: { add: ['node-pty'] } })
+    assert.deepEqual(build.added, [])
+    assert.equal(build.undo, null, '没有改动就不该有 undo（否则会把别人的内容覆盖回去）')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await test('prepareAllowBuilds：目标没有 pnpm-workspace.yaml → 跳过且不新建残废文件', () => {
+  const dir = tempProfile(null)
+  try {
+    const build = prepareAllowBuilds({ target: { dir }, allowBuilds: { add: ['node-pty'] } })
+    assert.deepEqual(build.added, [])
+    assert.deepEqual(build.skipped, ['node-pty'])
+    assert.equal(fs.existsSync(path.join(dir, 'pnpm-workspace.yaml')), false, '不能凭空造一个只含 allowBuilds 的文件')
+    assert.match(build.warnings.join('\n'), /没有 pnpm-workspace\.yaml/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await test('applyManaged：allowBuilds 在**第一次 installBundle 之前**就已落盘', async () => {
+  // 这是这个 bug 的核心：管理器的每次 installBundle 都是一次真的 pnpm 安装，
+  // 授权如果晚一步写，那次安装就已经在缺少授权的状态下跑完了。
+  const dir = tempProfile('packages:\n  - .\n')
+  try {
+    const file = path.join(dir, 'pnpm-workspace.yaml')
+    const seen = []
+    const manager = {
+      installBundle: async (spec) => {
+        seen.push({ spec, yaml: fs.readFileSync(file, 'utf8') })
+        return { application: 'applied' }
+      },
+    }
+    const p = { ...plan(), target: { dir }, allowBuilds: { add: ['node-pty'], addValues: { 'node-pty': 'true' } } }
+    const r = await applyManaged(p, { manager })
+    assert.equal(r.ok, true)
+    assert.deepEqual(r.allowBuildsAdded, ['node-pty'])
+    assert.ok(seen.length >= 1, '应当真的装了东西')
+    for (const s of seen) {
+      assert.match(s.yaml, /node-pty: true/, `${s.spec} 安装时授权必须已经在文件里了`)
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await test('applyManaged：安装失败时把 allowBuilds 退回原样（不留半成品）', async () => {
+  const original = 'packages:\n  - .\n'
+  const dir = tempProfile(original)
+  try {
+    const file = path.join(dir, 'pnpm-workspace.yaml')
+    const manager = fakeManager({ failOn: 'plug-a@^1.0.0' })
+    const p = { ...plan(), target: { dir }, allowBuilds: { add: ['node-pty'] } }
+    const r = await applyManaged(p, { manager })
+    assert.equal(r.ok, false)
+    assert.equal(r.allowBuildsReverted, true)
+    assert.equal(fs.readFileSync(file, 'utf8'), original, '失败后不能留下我们写入的授权项')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await test('applyManaged：没有 allowBuilds 缺口时不碰 pnpm-workspace.yaml', async () => {
+  const original = 'packages:\n  - .\n\nallowBuilds:\n  node-pty: true\n'
+  const dir = tempProfile(original)
+  try {
+    const file = path.join(dir, 'pnpm-workspace.yaml')
+    const r = await applyManaged({ ...plan(), target: { dir }, allowBuilds: { add: [] } }, { manager: fakeManager() })
+    assert.equal(r.ok, true)
+    assert.deepEqual(r.allowBuildsAdded, [])
+    assert.equal(fs.readFileSync(file, 'utf8'), original, '没有缺口就必须一个字节都不动')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 console.log('\n端口读取')

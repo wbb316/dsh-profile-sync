@@ -255,6 +255,39 @@ await test('writePending 没有显式 expect 时必须抛错（防止再长出�
   assert.match(String(threw.message), /expect/)
 })
 
+console.log('\n回归 6：apply 的失败原因不能再被吞成「接口报错」')
+
+// 客户端半是浏览器模块（`window.__ModuleLoader__.load`），没法 import 进来直接单测，
+// 所以这里对**源码契约**下断言。它锁的正是当初那个一行 bug 的两半：
+// 客户端必须读 `text`，宿主必须给 `text`。改坏任意一半，这一节都会红。
+const clientSrc = fs.readFileSync(new URL('./lib/client.js', import.meta.url), 'utf8')
+const hostSrc = fs.readFileSync(new URL('./lib/index.js', import.meta.url), 'utf8')
+
+await test('client：失败时读 payload.text（apply 返回的是 { ok:false, reason, text }，没有 message）', () => {
+  assert.ok(
+    !/payload\.message \|\| '接口报错'/.test(clientSrc),
+    '不能再只看 payload.message —— apply 的失败里根本没有 message，会退化成一句「接口报错」'
+  )
+  assert.match(clientSrc, /payload\.text \|\| payload\.message/, 'describeFailure 必须先读 text')
+  assert.match(clientSrc, /describeFailure\(payload, res\.status\)/, '兜底文案要带上真实的 HTTP 状态')
+})
+
+await test('client：reason 与 blockers 也要带出来（否则等于没说清为什么被拒）', () => {
+  assert.match(clientSrc, /payload\.reason/)
+  assert.match(clientSrc, /blockers/)
+})
+
+await test('宿主：apply 路由每条失败都带 text（这就是面板唯一的信息来源）', () => {
+  const start = hostSrc.indexOf('export function makeApplyRoute')
+  const end = hostSrc.indexOf('function planSummaryOf')
+  assert.ok(start > 0 && end > start, '找不到 makeApplyRoute 的源码区间（重构后请同步改这里）')
+  const body = hostSrc.slice(start, end)
+  const fails = [...body.matchAll(/ok: false/g)].length
+  const texts = [...body.matchAll(/\btext:/g)].length
+  assert.ok(fails >= 3, `应当至少有 3 条 ok:false 失败分支，实际 ${fails}`)
+  assert.ok(texts >= fails, `每条 ok:false 都要有 text；实际 ok:false=${fails}、text=${texts}`)
+})
+
 // ─────────────────────────── 清理 ───────────────────────────
 cleanup()
 clearPending()

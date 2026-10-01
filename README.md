@@ -68,6 +68,13 @@ function rejectElectronProfile(program, profile) {
 `install.cmd` 做的事：装前自检 → 确认官方的 `/api/plugin-manager` 端点在跑 →
 把 `link:<本目录>` 提交给应用内的官方管理器 → 轮询到包真的出现在已装列表里才算成功。
 
+> **两个路由族别搞混。** 本插件走的是 `/api/plugin-manager/*`（REST，回环直连、
+> **不需要 cookie**）；0.2 里另有一族 `/api/pluginManager/<method>`（Typert Remote），
+> 那族**要浏览器会话 cookie**，脚本直接 POST 会拿到 `401 unauthorized`。
+> 它不是本插件要走的通道。实测（DSH 0.2.0-rc.2）：`GET /api/plugin-manager/list` → `200`
+> 带真实插件列表；`POST /api/plugin-manager/install` 给个空 body → `400 install needs a spec`
+> —— 路由活着、body 被解析、身份根本没被校验。
+
 宿主半装完**通过 HMR 当场生效**（工具立即可用）；左侧栏面板刷新页面即可。
 
 需要 **Node.js 20+ 在 PATH 上**。`install.cmd` / `sync-plan.cmd` / 生成的 `apply.cmd`
@@ -222,6 +229,8 @@ ssh2 / cpu-features 的构建默认关着）。
 
 ## 执行顺序（以及为什么是这个顺序）
 
+**离线路径**（`web` / `headless` —— 目标端由 CLI 拥有）：
+
 ```
 1. 快照 package.json / pnpm-workspace.yaml / pnpm-lock.yaml
         / cordis.patch.yml / compatibility.json
@@ -231,6 +240,22 @@ ssh2 / cpu-features 的构建默认关着）。
 5. dsh plugin --profile <p> install   ← 官方：兼容性校验 + 自动回滚 + reconcile 激活
 6. 失败就把快照整个退回去
 ```
+
+**受管路径**（面板上的「应用（当场生效）」—— 目标端归桌面应用管）：
+
+```
+1. 先合并 allowBuilds   ← 同样必须在**任何一次** installBundle 之前
+2. 逐个 installBundle(<spec>)
+        ← 官方管理器负责改 dependencies、注册 dsh.profile.bundles、
+          兼容性校验、失败回滚；这一步我们**不写** manifest
+3. 失败 → 把 allowBuilds 退回原样，并停在那一条（后面的不再试）
+```
+
+两条路在 `allowBuilds` 上必须**等价**，因为官方管理器只管 `package.json` 与
+`node_modules` —— 它**不碰 `pnpm-workspace.yaml`**，那份授权只能由本插件写、
+也只能由本插件在失败时退回（它的回滚覆盖不到这一项）。第 1 步排在安装前是硬要求：
+每一次 `installBundle` 都是一次真的 pnpm 安装，晚一步写，那次安装就已经在缺授权
+状态下跑完了。（这正是「修过的 bug」第 7 条。）
 
 **第 4 步为什么不直接用 `dsh plugin add name@^0.11.3`**：
 Windows 上 `dsh` 是 `.cmd`，spawn 必须走 shell，而 cmd.exe 把 `^` 当转义字符 ——
@@ -260,15 +285,15 @@ Windows 上 `dsh` 是 `.cmd`，spawn 必须走 shell，而 cmd.exe 把 `^` 当�
 ## 测试
 
 ```bash
-node test-plan.mjs         # 18 项：纯函数 + 合成 fixture + 对真实 profile 算一遍
-node test-apply.mjs        #  7 项：快照/回滚/原子写/dry-run/拒绝条件（用合成 profile）
-node test-host.mjs         # 12 项：路由与工具契约、客户端席位注册与注销
-node test-regressions.mjs  # 13 项：每个用例对应一个**真实修过的 bug**
+node test-plan.mjs         # 19 项：纯函数 + 合成 fixture + 对真实 profile 算一遍
 node test-manifest.mjs     # 14 项：清单不变式 + 真加载（坏包必须被挡住）
-node test-managed.mjs      # 15 项：官方管理器解析、进程内应用、HTTP 端点通道
+node test-regressions.mjs  # 16 项：每个用例对应一个**真实修过的 bug**
+node test-apply.mjs        #  7 项：快照/回滚/原子写/dry-run/拒绝条件（用合成 profile）
+node test-host.mjs         # 14 项：路由与工具契约、客户端席位注册与注销
+node test-managed.mjs      # 22 项：官方管理器解析、进程内应用、allowBuilds 合并、HTTP 端点通道
 ```
 
-共 79 项，都不启动 DSH、不占端口、不跑 pnpm（runner 是注入的假函数）。
+共 92 项，都不启动 DSH、不占端口、不跑 pnpm（runner 是注入的假函数）。
 `test-apply.mjs` / `test-regressions.mjs` 会在 `~/.dsh/profiles/` 下建
 `synctest-*` 合成 profile，跑完删掉 —— 不碰真实的 `web` / `desktop`。
 
@@ -316,6 +341,17 @@ link 装入目标插件 → 起服务（**加 `--no-open`，绝不许弹用户�
    去 `.entries()` —— 校验函数崩了等于没校验。
 6. **预发布号被当成不存在。** `>=0.2.0-rc.3` 对着运行时 `0.2.0-rc.2` 会被判成「满足」。
    这个生态全是 rc 版本，属常态；现在按 semver 正确比较预发布段。
+7. **面板路径漏搬 `allowBuilds`，而且是静默的。** 离线路径会在 install 前合并
+   `pnpm-workspace.yaml` 的 `allowBuilds`，面板那条「应用（当场生效）」却从不处理它 ——
+   同一个计划，两条路给出不同结果。更糟的是它**不报错**：拿改动前的代码实跑，
+   缺授权时照样返回成功，原生构建产物却没铺出来。现在两条路共用同一份
+   `mergeAllowBuildsText`，授权在任何一次 `installBundle` 之前落盘、失败时退回，
+   并把「补了哪几项 / 跳过了哪几项」报给面板。
+8. **失败原因被吞成「接口报错」。** 宿主各条路由的失败形状并不统一（`get` / `post`
+   包装器给的是 `message`，apply 那条给的是 `{ ok:false, reason, text }`），而客户端
+   只读了 `payload.message` —— 于是**所有**安装失败都退化成同一句没有信息量的话，
+   真正的原因一直躺在 `text` 里没人读。现在 `describeFailure()` 按
+   `text → message` 取，并补上 `reason`、`blockers` 和真实 HTTP 状态。
 
 ## 诚实的边界
 
@@ -326,6 +362,10 @@ link 装入目标插件 → 起服务（**加 `--no-open`，绝不许弹用户�
   所以 `apply` 会拒绝目标目录不等于 `profiles/<名字>` 的情况。
 - **`allowBuilds` 的 YAML 处理是抄 `dshmarket` 的**（CRLF、作用域包名要加引号、
   已经坏成两个 `allowBuilds:` 块的会合并成一个）。那块被真实 bug 打磨过，不重写。
+- **客户端半只能做源码契约断言**。`lib/client.js` 是浏览器模块
+  （`window.__ModuleLoader__.load({ factory })`），没法 `import` 进 Node 单测，所以
+  `test-regressions.mjs` 对它锁的是**源码契约**（失败时读 `text`、带出 `reason`/`blockers`）——
+  改坏任一半就红，但它不是端到端的渲染验证；后者靠 `bin/verify-client.mjs` 那条无头浏览器通路。
 - **进程守卫靠进程名 + 命令行**。桌面端命令行里没有 `--profile desktop`
   （是 `DeepSeek Harness.exe` + host 脚本），只能按进程名认；两路检查都跑不起来时
   会拒绝并要求 `--yes`，而不是默默继续。
