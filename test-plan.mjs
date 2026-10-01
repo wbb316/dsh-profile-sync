@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import {
   advisoryEngineCheck,
   computePlan,
+  filterPlan,
   INBOX_BUNDLES,
   localSpecPath,
   mergeAllowBuildsText,
@@ -24,6 +25,7 @@ import {
   profilesRoot,
   registryVersionCore,
   renderPlanText,
+  selectablePlugins,
   specKind,
   specsToInstall,
   summarizePatch,
@@ -183,6 +185,125 @@ test('specsToInstall：registry 拼 name@range；link/file 原样给（不能加
     change: [{ name: 'b', spec: 'file:D:/t.tgz', kind: 'file' }],
   }
   assert.deepEqual(specsToInstall(plan), ['a@^1.0.0', 'link:D:/p', 'file:D:/t.tgz'])
+})
+
+// ── 选择：只迁移勾选的那几个插件 ──
+// 手写计划而不是走 fixture：这里要卡的正是「哪些字段被筛、哪些必须留下」的分界，
+// 用合成 profile 反而会掺进 computePlan 的行为。
+const samplePlan = {
+  add: [
+    { name: 'plug-a', spec: '^1.0.0', kind: 'registry' },
+    { name: 'plug-b', spec: 'link:D:/p', kind: 'link' },
+  ],
+  change: [{ name: 'plug-c', spec: '^2.0.0', fromSpec: '^1.0.0', kind: 'registry' }],
+  repin: [{ name: 'plug-d', spec: '1.0.0', fromSpec: '^1.0.0' }],
+  bundles: { add: ['plug-a', 'plug-b'], same: ['@deepseek-ai/dsh-base'], extraInTarget: [] },
+  allowBuilds: {
+    add: ['node-pty', 'plug-a'],
+    addValues: { 'node-pty': false, 'plug-a': true },
+    same: [],
+    valueMismatch: [],
+  },
+  engineAdvisory: [{ package: 'plug-a', range: '^1' }],
+  blockers: [
+    { code: 'spec-path-missing', message: 'plug-b 的路径没了', package: 'plug-b' },
+    { code: 'entry-id-collision', message: '撞车', candidate: 'plug-a', entryId: 'x' },
+    { code: 'target-missing', message: '目标不可读' },
+  ],
+  warnings: [
+    { code: 'engine-advisory', message: 'plug-a 引擎不符', package: 'plug-a' },
+    { code: 'no-bundle-declaration', message: 'plug-b 没声明', package: 'plug-b' },
+    { code: 'compatibility-exemption', message: '全局提醒' },
+  ],
+  same: [],
+  extraInTarget: [],
+  notes: [],
+  configDiff: [],
+  prune: false,
+  source: { name: 'web', dir: 'W' },
+  target: { name: 'desktop', dir: 'D' },
+  runtimeVersion: null,
+  ok: false,
+}
+
+test('选择：不传 only 时计划原样返回（旧调用方行为一字不变）', () => {
+  assert.equal(filterPlan(samplePlan, undefined), samplePlan)
+  assert.equal(filterPlan(samplePlan, null), samplePlan)
+})
+
+test('选择：可勾选单元 = add/change/repin + bundle + allowBuilds 键，按包名去重', () => {
+  const rows = selectablePlugins(samplePlan)
+  assert.deepEqual(rows.map((r) => r.name), ['plug-a', 'plug-b', 'plug-c', 'plug-d', 'node-pty'])
+  // 同一个包的多重动作必须合到一行 —— 否则面板上会出现两个 plug-a
+  assert.deepEqual(rows.find((r) => r.name === 'plug-a').actions, ['add', 'bundle', 'allowBuilds'])
+  // 依赖已在目标端、只是缺授权的包也要能单独勾（node-pty 不在任何 add/change 里）
+  assert.deepEqual(rows.find((r) => r.name === 'node-pty').actions, ['allowBuilds'])
+})
+
+test('选择：只留勾中的依赖 / bundle / allowBuilds，且 addValues 一起裁', () => {
+  const sub = filterPlan(samplePlan, ['plug-a'])
+  assert.deepEqual(sub.add.map((e) => e.name), ['plug-a'])
+  assert.deepEqual(sub.change, [])
+  assert.deepEqual(sub.repin, [])
+  assert.deepEqual(sub.bundles.add, ['plug-a'])
+  assert.deepEqual(sub.allowBuilds.add, ['plug-a'])
+  assert.deepEqual(sub.allowBuilds.addValues, { 'plug-a': true })
+  assert.ok(!('node-pty' in sub.allowBuilds.addValues), '没勾的键不能留在 addValues 里')
+})
+
+test('选择：不相关插件的阻断项被筛掉，全局阻断项留下', () => {
+  const sub = filterPlan(samplePlan, ['plug-a'])
+  assert.deepEqual(sub.blockers.map((b) => b.code), ['entry-id-collision', 'target-missing'])
+  assert.equal(sub.ok, false, '全局阻断项还在 → 整体仍不可应用')
+})
+
+test('选择：勾掉带阻断的插件后 ok 重算为 true', () => {
+  const p = { ...samplePlan, blockers: [{ code: 'spec-path-missing', message: 'plug-b 没了', package: 'plug-b' }] }
+  assert.equal(filterPlan(p, ['plug-a']).ok, true)
+  assert.equal(filterPlan(p, ['plug-a', 'plug-b']).ok, false)
+})
+
+test('选择：不相关的提醒也被筛掉，全局提醒留下', () => {
+  const sub = filterPlan(samplePlan, ['plug-a'])
+  assert.deepEqual(sub.warnings.map((w) => w.code), ['engine-advisory', 'compatibility-exemption'])
+  assert.deepEqual(sub.engineAdvisory, [{ package: 'plug-a', range: '^1' }])
+})
+
+test('选择：空数组合法 —— 筛出空计划，但全局阻断项仍留下（调用方必须自己拦空选择）', () => {
+  const sub = filterPlan(samplePlan, [])
+  assert.deepEqual(sub.add, [])
+  assert.deepEqual(sub.change, [])
+  assert.deepEqual(sub.repin, [])
+  assert.deepEqual(sub.bundles.add, [])
+  assert.deepEqual(sub.allowBuilds.add, [])
+  assert.deepEqual(sub.allowBuilds.addValues, {})
+  // 没有归属信息的阻断项说的不是某个插件，而是这次迁移整体 → 不参与筛选
+  assert.deepEqual(sub.blockers.map((b) => b.code), ['target-missing'])
+  assert.equal(sub.selection.all, false)
+  assert.equal(sub.selection.total, 5)
+  // 危险的那种情况：计划本身健康 + 一个都没勾 → ok 为 true、却什么都没得做。
+  // 光看 ok 分不出它和「已经一致」，所以路由层必须有显式的空选择守卫。
+  const healthy = { ...samplePlan, blockers: [], warnings: [] }
+  assert.equal(filterPlan(healthy, []).ok, true)
+})
+
+test('选择：全勾 == 不做选择（内容相同，只多记了 selection）', () => {
+  const all = selectablePlugins(samplePlan).map((r) => r.name)
+  const sub = filterPlan(samplePlan, all)
+  assert.deepEqual(sub.add, samplePlan.add)
+  assert.deepEqual(sub.bundles.add, samplePlan.bundles.add)
+  assert.deepEqual(sub.allowBuilds.add, samplePlan.allowBuilds.add)
+  assert.deepEqual(sub.blockers, samplePlan.blockers)
+  assert.equal(sub.selection.all, true)
+})
+
+test('选择：报告写明迁移范围（plan.json / apply.cmd 事后可追溯）', () => {
+  const one = renderPlanText(filterPlan(samplePlan, ['plug-a']))
+  assert.ok(one.includes('迁移范围：勾选的 1/5 个'), one)
+  assert.ok(one.includes('plug-a'), one)
+  const all = renderPlanText(filterPlan(samplePlan, selectablePlugins(samplePlan).map((r) => r.name)))
+  assert.ok(all.includes('迁移范围：全部 5 个'), all)
+  assert.ok(!renderPlanText(samplePlan).includes('迁移范围'), '不做选择时报告不该多出这一行')
 })
 
 // ─────────────────────── B. 合成 fixture 计划 ───────────────────────

@@ -1,6 +1,6 @@
 {
   "name": "dsh-profile-sync",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "profile 间插件迁移：把网页版（web）profile 的插件集安全地牵引到桌面端（desktop）—— 算差异、预检、生成退出后执行的脚本、重启后核对。绝不把实例配置（端口/坐标/地址）一起抄过去。",
   "type": "module",
   "main": "lib/index.js",

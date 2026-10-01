@@ -288,6 +288,48 @@ await test('宿主：apply 路由每条失败都带 text（这就是面板唯一
   assert.ok(texts >= fails, `每条 ok:false 都要有 text；实际 ok:false=${fails}、text=${texts}`)
 })
 
+console.log('\n回归 7：面板「只迁勾中的」必须真的传到宿主（两条路都要），且选择只有一份实现')
+
+// 这一节锁的是「选择」这件事的三个失败方式：
+//   1. 只给 apply 传 only、忘了 write（或反过来）→ 一半的操作偷偷迁全部
+//   2. 客户端自己再实现一遍筛选 → 出现第二份选择语义，两边必然漂
+//   3. 空选择没拦 → 筛出来是 ok:true 的空计划，看着像成功、实际什么都没做
+
+await test('client：/apply 与 /write 都必须带上 only（少一处就会有一半偷偷迁全部）', () => {
+  const sent = [...clientSrc.matchAll(/only: onlyArg\(\)/g)].length
+  assert.equal(sent, 2, `apply 与 write 各需一处 only: onlyArg()，实际找到 ${sent} 处`)
+})
+
+await test('client：算完差异默认全勾（等于原来的一键迁移）', () => {
+  assert.match(
+    clientSrc,
+    /setChecked\(new Set\(rows\.map\(\(r\) => r\.name\)\)\)/,
+    '算完差异要默认全勾；否则「算差异 → 应用」不再是原来的一键行为'
+  )
+  assert.match(clientSrc, /isNothingSelected|nothingSelected/, '面板要能识别「一个都没勾」并拦住按钮')
+})
+
+await test('client：勾选行只来自宿主的 selectable，客户端不得重算选择语义', () => {
+  assert.match(clientSrc, /Array\.isArray\(data\.selectable\)/, '勾选行必须来自 /plan 的 selectable')
+  assert.ok(!/filterPlan/.test(clientSrc), '客户端不得自己实现筛选 —— 选择语义只有 lib/plan.js 一份')
+  assert.ok(
+    !/allowBuilds\.add\.filter/.test(clientSrc),
+    '客户端不得自己筛 allowBuilds：勾选联动（bundle / allowBuilds 跟着包走）由 filterPlan 统一负责'
+  )
+})
+
+await test('宿主：/api/plan 给出 selectable，write 与 apply 都接受 only', () => {
+  assert.match(hostSrc, /selectable: selectablePlugins\(plan\)/, '/api/plan 要返回可勾选名单')
+  assert.match(hostSrc, /only: body\.only/, '/api/write 要把 only 交给产物生成')
+  assert.match(hostSrc, /filterPlan\(safePlan\(body\), body\?\.only\)/, 'apply 路由要先筛再判 ok')
+})
+
+await test('宿主：空选择在每条会动手的路径上都被显式拦住', () => {
+  const hits = [...hostSrc.matchAll(/isNothingSelected\(/g)].length
+  assert.ok(hits >= 4, `定义 1 处 + 至少 3 处调用（generateArtifacts / 工具 apply / apply 路由），实际 ${hits}`)
+  assert.match(hostSrc, /reason: 'empty-selection'/, 'apply 路由要给一个能区分的 reason')
+})
+
 // ─────────────────────────── 清理 ───────────────────────────
 cleanup()
 clearPending()

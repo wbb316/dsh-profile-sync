@@ -5,7 +5,8 @@
 它的定位很窄：**自己不装任何东西**。它只做四件事 —— 算差异、预检、写一个「退出后执行的脚本」、
 下次启动后核对是否真的落地；真正的安装交给官方通道（桌面端走应用内管理器，其它 profile 走 `dsh plugin`）。
 
-装完的效果：左侧栏多一个「插件迁移」面板 —— 选源/目标 → 算差异 → 生成执行脚本 → 核对上次迁移。
+装完的效果：左侧栏多一个「插件迁移」面板 —— 选源/目标 → 算差异 → **勾选这次要迁哪几个插件** →
+生成执行脚本 / 当场应用 → 核对上次迁移。
 
 ---
 
@@ -162,13 +163,26 @@ node bin/check.mjs
 
 ### 面板
 
-左侧栏「插件迁移」：选源/目标 → 算差异 → 生成执行脚本 → 核对上次迁移。
+左侧栏「插件迁移」：选源/目标 → 算差异 → 勾选要迁的插件 → 生成执行脚本 / 当场应用 → 核对上次迁移。
 显示每个 profile 的端口和插件数，计划里给出「新增 / 变更 / 仅钉法不同 /
 bundle 新增 / allowBuilds 新增 / 阻断 / 提醒」的分项摘要。
+
+**算完差异会出现一份插件清单，默认全勾** —— 不勾选直接应用就是原来的一键全迁。
+每个插件一行，右侧标签标出它这次会做什么（`新增` / `变更` / `仅钉法` / `启用` / `授权`）。
+取消勾选 = 那个插件这次不迁；它的 bundle 启用项与 allowBuilds 授权会**一起跟着不迁**，
+不会单独漏进去。旁边三个快捷按钮：全选 / 全不选 / 只勾新增变更。
+
+勾选是在**宿主侧**筛的（`filterPlan`），面板自己不做任何过滤 —— 所以「应用（当场生效）」
+和「生成执行脚本」两条路吃的是同一份筛过的计划，写出来的 `plan.json` / `apply.cmd`
+里也只有勾中的那部分，离线脚本不需要再理解一遍选择语义。一个都没勾时两个按钮禁用，
+服务端也会拒绝（`reason: 'empty-selection'`）—— 因为「空选择」筛出来的计划 `ok` 仍为
+`true`，光看 `ok` 分不出它和「两边已经一致」。
 
 ### 给 agent 的工具
 
 `profile_sync`，`action` 取 `plan` / `write` / `status` / `profiles`。
+`plan` 会列出**可勾选的插件名单**（包名 + 动作）；`apply` / `write` 可用
+`only: ["dsh-wechat", "dsh-novel"]` 只迁其中几个，不传 = 全部。
 
 ---
 
@@ -285,15 +299,15 @@ Windows 上 `dsh` 是 `.cmd`，spawn 必须走 shell，而 cmd.exe 把 `^` 当�
 ## 测试
 
 ```bash
-node test-plan.mjs         # 19 项：纯函数 + 合成 fixture + 对真实 profile 算一遍
+node test-plan.mjs         # 28 项：纯函数 + 选择筛选 + 合成 fixture + 对真实 profile 算一遍
 node test-manifest.mjs     # 14 项：清单不变式 + 真加载（坏包必须被挡住）
-node test-regressions.mjs  # 16 项：每个用例对应一个**真实修过的 bug**
+node test-regressions.mjs  # 21 项：每个用例对应一个**真实修过的 bug** / 真实踩过的坑
 node test-apply.mjs        #  7 项：快照/回滚/原子写/dry-run/拒绝条件（用合成 profile）
 node test-host.mjs         # 14 项：路由与工具契约、客户端席位注册与注销
 node test-managed.mjs      # 22 项：官方管理器解析、进程内应用、allowBuilds 合并、HTTP 端点通道
 ```
 
-共 92 项，都不启动 DSH、不占端口、不跑 pnpm（runner 是注入的假函数）。
+共 106 项，都不启动 DSH、不占端口、不跑 pnpm（runner 是注入的假函数）。
 `test-apply.mjs` / `test-regressions.mjs` 会在 `~/.dsh/profiles/` 下建
 `synctest-*` 合成 profile，跑完删掉 —— 不碰真实的 `web` / `desktop`。
 
