@@ -212,6 +212,23 @@ bundle 新增 / allowBuilds 新增 / 阻断 / 提醒」的分项摘要。
 朴素 diff 会把它当成「变更」，从而覆盖掉目标端那个加固。所以本插件单独归一类
 `repin`，**只报告、默认不动**。
 
+## 版本倒退会被提前指出来（只提醒，不阻断）
+
+计划里出现 `version-downgrade` 提醒，意思是**源侧那一版比目标侧旧**，所以「照搬源侧」
+这一步实际是把目标**降级**。官方管理器会拒绝它并回滚这条改动 —— 提前说出来，是为了
+不让你对着一个能点的「应用」和一句没有信息量的失败发呆。
+
+为什么它**不**做成阻断项：`bin/apply.mjs --no-install` 下有意回滚某个插件的版本是
+合法用法，硬拦会把那条路一起封死。与 `engine-advisory` 同一档。
+
+判据只比 **registry 形态**的版本核心（`^0.4.4` 与 `0.4.4` 都算 `0.4.4`）：
+`link:` / `file:` / `git` 没有可比的版本，一律不判。所以「同版本、只是钉法不同」
+仍然归 `repin`（保留目标端钉法、不动），不会误报成降级。
+
+> 实测过的那次：网页版还在 0.1 世代时，把它的 `@linxin666/dsh-web-all@^0.3.24`
+> 照搬到桌面端，就是要把桌面端的 `0.4.4` 降回去 —— 官方管理器必然拒绝。
+> 真正的迁移路径不是让插件对齐源侧，而是**把两侧装成同一世代的同一批插件**。
+
 ## `allowBuilds` 连值一起搬，且不会把 `false` 翻成 `true`
 
 `pnpm-workspace.yaml` 的 `allowBuilds` 里，**值本身是有语义的**：显式写 `false` 是
@@ -299,15 +316,15 @@ Windows 上 `dsh` 是 `.cmd`，spawn 必须走 shell，而 cmd.exe 把 `^` 当�
 ## 测试
 
 ```bash
-node test-plan.mjs         # 28 项：纯函数 + 选择筛选 + 合成 fixture + 对真实 profile 算一遍
+node test-plan.mjs         # 36 项：纯函数 + 选择筛选 + 版本倒退 + 合成 fixture + 对真实 profile 算一遍
 node test-manifest.mjs     # 14 项：清单不变式 + 真加载（坏包必须被挡住）
 node test-regressions.mjs  # 21 项：每个用例对应一个**真实修过的 bug** / 真实踩过的坑
 node test-apply.mjs        #  7 项：快照/回滚/原子写/dry-run/拒绝条件（用合成 profile）
 node test-host.mjs         # 14 项：路由与工具契约、客户端席位注册与注销
-node test-managed.mjs      # 22 项：官方管理器解析、进程内应用、allowBuilds 合并、HTTP 端点通道
+node test-managed.mjs      # 26 项：官方管理器解析、进程内应用、allowBuilds 合并、组合包启用、HTTP 端点通道
 ```
 
-共 106 项，都不启动 DSH、不占端口、不跑 pnpm（runner 是注入的假函数）。
+共 118 项，都不启动 DSH、不占端口、不跑 pnpm（runner 是注入的假函数）。
 `test-apply.mjs` / `test-regressions.mjs` 会在 `~/.dsh/profiles/` 下建
 `synctest-*` 合成 profile，跑完删掉 —— 不碰真实的 `web` / `desktop`。
 
@@ -366,6 +383,18 @@ link 装入目标插件 → 起服务（**加 `--no-open`，绝不许弹用户�
    只读了 `payload.message` —— 于是**所有**安装失败都退化成同一句没有信息量的话，
    真正的原因一直躺在 `text` 里没人读。现在 `describeFailure()` 按
    `text → message` 取，并补上 `reason`、`blockers` 和真实 HTTP 状态。
+9. **勾选迁移时 `prune` 不受勾选约束（破坏性）。** `filterPlan` 筛掉了 `add/change/...`，
+   却把 `extraInTarget` 与 `bundles.extraInTarget` 原样留下 —— 而这两类**不在可勾选
+   清单里**（面板上根本看不见）。于是 `--prune` 时勾一个插件，会连带删掉/移除那些
+   没勾中、也没显示过的依赖与 bundle。现在勾选迁移**不执行 prune**，并明确提醒；
+   要连它们一起清就不传 `only`（= 全部）。
+10. **只勾「启用 bundle」的行 = 假成功。** 依赖早就装好、只是没进加载层这种差异
+    不在 `add/change` 里，而受管路径只装 `add + change`，于是它什么都没做，
+    却被渲染成「已经和源一致，没有要改的」。现在受管路径会调官方已有的
+    `setBundleEnabled(name, true)`（对**不在安装清单里**的名字才调 —— 官方 README
+    写着启用是「追加到列表末尾」，会改变配置优先级，装的时候已经顺带启用过的不重排）。
+11. **版本倒退没有预检。** 分类只看「版本核心是否相等」、不看向哪边，于是源侧比
+    目标侧旧时计划照样把「应用」摆出来。现在出 `version-downgrade` 提醒（不阻断）。
 
 ## 诚实的边界
 

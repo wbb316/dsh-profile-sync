@@ -104,6 +104,11 @@ function fakeManager(behavior = {}) {
       calls.push({ op: 'remove', name })
       return { application: 'applied' }
     },
+    async setBundleEnabled(name, enabled) {
+      calls.push({ op: 'enableBundle', name, enabled })
+      if (behavior.failBundleOn === name) return { application: 'failed', error: `${name} 启用被拒绝` }
+      return { application: 'applied' }
+    },
   }
 }
 
@@ -141,6 +146,50 @@ await test('applyManaged：失败就停在那一条，不再继续往下装', as
   assert.equal(r.failedSpec, 'plug-b@2.0.0')
   assert.match(String(r.error), /被拒绝/)
   assert.equal(manager.calls.length, 2, '第一条成功了、第二条失败后必须停住，不要继续')
+})
+
+// ── 组合包启用：受管路径以前完全不碰它，于是「只勾 bundle 行」= 假成功 ──
+const bundleOnlyPlan = () => ({ add: [], change: [], bundles: { add: ['bundled-only'] }, extraInTarget: [] })
+
+await test('applyManaged：只勾「启用 bundle」的行会真的调 setBundleEnabled（不再是假成功）', async () => {
+  const manager = fakeManager()
+  const r = await applyManaged(bundleOnlyPlan(), { manager })
+  assert.equal(r.ok, true)
+  assert.deepEqual(manager.calls, [{ op: 'enableBundle', name: 'bundled-only', enabled: true }])
+  assert.deepEqual(r.bundleResults, [{ name: 'bundled-only', ok: true, application: 'applied', error: null }])
+})
+
+await test('applyManaged：已在安装清单里的组合包不重复启用（启用是追加到末尾，会改优先级）', async () => {
+  const manager = fakeManager()
+  const r = await applyManaged(
+    {
+      add: [{ name: 'plug-a', spec: '^1.0.0', kind: 'registry' }],
+      change: [],
+      bundles: { add: ['plug-a'] },
+      extraInTarget: [],
+    },
+    { manager }
+  )
+  assert.equal(r.ok, true)
+  assert.deepEqual(manager.calls, [{ op: 'install', spec: 'plug-a@^1.0.0' }], '装它时已顺带启用，不该再调一次')
+  assert.deepEqual(r.bundleResults, [])
+})
+
+await test('applyManaged：setBundleEnabled 失败 → failedBundle，已装好的与 allowBuilds 都不回滚', async () => {
+  const manager = fakeManager({ failBundleOn: 'bundled-only' })
+  const r = await applyManaged(bundleOnlyPlan(), { manager })
+  assert.equal(r.ok, false)
+  assert.equal(r.failedBundle, 'bundled-only')
+  assert.match(String(r.error), /被拒绝/)
+  assert.equal(r.allowBuildsReverted, false, '已装好的东西还需要那份授权，不能退')
+})
+
+await test('applyManaged：宿主没有 setBundleEnabled → 如实失败，不许 continue 之后报成功', async () => {
+  const manager = { installBundle: async () => ({ application: 'applied' }) }
+  const r = await applyManaged(bundleOnlyPlan(), { manager })
+  assert.equal(r.ok, false, '缺口必须暴露，否则 index.js 会把它盖成「已经一致」')
+  assert.equal(r.failedBundle, 'bundled-only')
+  assert.equal(r.bundleResults[0].ok, false)
 })
 
 await test('applyManaged：installBundle 抛异常也要变成结果，不能炸穿', async () => {

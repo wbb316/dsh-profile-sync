@@ -427,6 +427,90 @@ test('没有可加载入口的包 → 阻断（否则提升进 bundle 层会炸�
   assert.ok(plan.blockers.some((b) => b.code === 'no-loadable-entry' && b.package === 'src-only'))
 })
 
+// ── 勾选与 prune：破坏性动作不能碰「没勾中、也看不见」的东西 ──
+test('选择：勾选迁移不执行 prune —— extraInTarget 被清空并给出提醒', () => {
+  const withExtra = {
+    ...samplePlan,
+    extraInTarget: [{ name: 'only-in-target', spec: '^1.0.0' }],
+    bundles: { ...samplePlan.bundles, extraInTarget: ['tgt-only-bundle'] },
+  }
+  const sub = filterPlan(withExtra, ['plug-a'])
+  assert.deepEqual(sub.extraInTarget, [], '没勾中、也看不见的依赖不该被删')
+  assert.deepEqual(sub.bundles.extraInTarget, [], '同一个道理：只在目标端的 bundle 也不能被移除')
+  const w = sub.warnings.find((x) => x.code === 'prune-limited-by-selection')
+  assert.ok(w, '必须有一条提醒说明 prune 被跳过了')
+  assert.match(w.message, /2 项/, '要说清被保住的是几项')
+})
+
+test('选择：不传 only 时 prune 照旧（extraInTarget 原样保留）', () => {
+  const withExtra = { ...samplePlan, extraInTarget: [{ name: 'only-in-target', spec: '^1.0.0' }] }
+  assert.equal(filterPlan(withExtra, undefined).extraInTarget.length, 1)
+})
+
+test('选择：selection.all 按「逐个包含」判断，不被凑数的假名字放大', () => {
+  // 旧实现是 `selected.size >= total`：5 个**不存在**的名字正好凑够 5，
+  // 于是「一个真插件都没勾」会被说成「全部」。
+  const fake = filterPlan(samplePlan, ['x1', 'x2', 'x3', 'x4', 'x5'])
+  assert.equal(fake.selection.total, 5)
+  assert.equal(fake.selection.all, false, '一个真插件都没勾中，不能报「全部」')
+  const all = filterPlan(samplePlan, ['plug-a', 'plug-b', 'plug-c', 'plug-d', 'node-pty'])
+  assert.equal(all.selection.all, true)
+})
+
+// ── 版本倒退：源侧比目标侧旧时，这一步实际是把目标降级 ──
+function planBetween(tag, sourceDeps, targetDeps) {
+  const src = path.join(tmp, `${tag}-src`)
+  const tgt = path.join(tmp, `${tag}-tgt`)
+  makeProfile(src, { name: 's', dependencies: sourceDeps, dsh: { profile: { bundles: [] } } })
+  makeProfile(tgt, { name: 't', dependencies: targetDeps, dsh: { profile: { bundles: [] } } })
+  return computePlan({ source: src, target: tgt })
+}
+
+test('版本倒退：源侧更旧 → 进 change + version-downgrade 提醒，但**不阻断**', () => {
+  const plan = planBetween('dg', { 'web-all': '^0.3.24' }, { 'web-all': '0.4.4' })
+  assert.deepEqual(plan.downgrades.map((d) => d.name), ['web-all'])
+  assert.equal(plan.downgrades[0].fromCore, '0.4.4')
+  assert.equal(plan.downgrades[0].toCore, '0.3.24')
+  assert.ok(plan.change.some((e) => e.name === 'web-all'), '降级仍是一条 change（只报告、不阻断）')
+  assert.equal(plan.ok, true, '这是提醒，不是阻断项 —— --no-install 下有意回滚是合法用法')
+  const w = plan.warnings.find((x) => x.code === 'version-downgrade')
+  assert.ok(w, '必须有一条 version-downgrade 提醒')
+  assert.match(w.message, /降级/)
+})
+
+test('版本前进（源侧更新）不报倒退 —— 那才是正常迁移', () => {
+  const plan = planBetween('up', { 'web-all': '0.4.4' }, { 'web-all': '^0.3.24' })
+  assert.deepEqual(plan.downgrades, [])
+  assert.ok(!plan.warnings.some((w) => w.code === 'version-downgrade'))
+})
+
+test('同版本不同钉法仍归 repin，不算倒退（^0.4.4 vs 0.4.4）', () => {
+  const plan = planBetween('pin', { 'web-all': '^0.4.4' }, { 'web-all': '0.4.4' })
+  assert.equal(plan.repin.length, 1)
+  assert.deepEqual(plan.downgrades, [])
+})
+
+test('link: 没有可比的版本 → 不报倒退（不是所有 spec 都能比大小）', () => {
+  const plan = planBetween('lnk', { 'dsh-novel': 'link:D:/dsh/plugins/dsh-novel-plugin' }, { 'dsh-novel': 'link:D:/dsh/plugins' })
+  assert.deepEqual(plan.downgrades, [])
+})
+
+test('版本倒退的提醒会被 only 一起筛掉（它带 package 名）', () => {
+  const withDowngrade = {
+    ...samplePlan,
+    downgrades: [{ name: 'plug-c', from: '0.4.4', to: '^0.3.24', fromCore: '0.4.4', toCore: '0.3.24' }],
+    warnings: [...samplePlan.warnings, { code: 'version-downgrade', message: 'plug-c 要降级', package: 'plug-c' }],
+  }
+  const sub = filterPlan(withDowngrade, ['plug-a'])
+  assert.ok(!sub.warnings.some((w) => w.code === 'version-downgrade'), '没勾 plug-c 就不该提醒它降级')
+  // 这一条是补的：上面只断言了「提醒」被筛掉，数组本身却靠 `...plan` 漏了过去 ——
+  // 而那正是 extraInTarget 那条 bug 的同一个形状。断言数组，别只断言提醒。
+  assert.deepEqual(sub.downgrades, [], 'downgrades 数组也必须被筛掉（它靠 ...plan 漏过去过一次）')
+  const sub2 = filterPlan(withDowngrade, ['plug-c'])
+  assert.ok(sub2.warnings.some((w) => w.code === 'version-downgrade'), '勾了它就必须提醒')
+  assert.deepEqual(sub2.downgrades.map((d) => d.name), ['plug-c'], '勾中的降级项必须留着')
+})
+
 // ─────────────────────── C. 真实 profile ───────────────────────
 console.log('\nC. 真实 profile（这台机器上的 web → desktop）')
 
