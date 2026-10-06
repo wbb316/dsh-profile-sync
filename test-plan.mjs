@@ -454,7 +454,7 @@ test('tarballUrlHint：github 短形态 → 可直接粘贴的 tarball URL（不
   assert.equal(tarballUrlHint('^1.0.0', '1.0.0'), null)
 })
 
-test('git 源：必须给提醒、但绝不能阻断（它没有任何本地预检可做）', () => {
+test('git 源：只提醒不阻断 —— 归因指向 git 自己的 http.proxy，不是「git 源不可靠」', () => {
   const src = path.join(tmp, 'g-src')
   const tgt = path.join(tmp, 'g-tgt')
   makeProfile(src, {
@@ -480,6 +480,11 @@ test('git 源：必须给提醒、但绝不能阻断（它没有任何本地预�
   assert.equal(hits.length, 1, '只该给 git 源那一个发提醒：' + JSON.stringify(plan.warnings))
   assert.equal(hits[0].package, 'git-only')
   assert.match(hits[0].message, /ERR_PNPM_GIT_RESOLVE_FAILED/, '要说清装不上时该看什么报错')
+  // 归因必须是**机制**，不能停在含糊的「网络不好」。这条我最初写成「git 传输层脆弱」，
+  // 当天复测推翻：真实变量是 git 自己的 http.proxy，而 pnpm 不读它。
+  assert.match(hits[0].message, /http\.proxy/, '归因要落在 git 自己的代理配置上')
+  // 以及一条必须说清的边界：tarball 绕得开 git，绕不开 github 可达性
+  assert.match(hits[0].message, /codeload|不可达/, '要说清 tarball 也依赖 github 可达性')
   // 关键：提醒必须**可粘贴**，不能只说「注意网络」。版本可读时 tag 要填好。
   assert.ok(
     hits[0].message.includes('https://github.com/wbb316/dsh-novel/archive/refs/tags/v7.7.7.tar.gz'),
