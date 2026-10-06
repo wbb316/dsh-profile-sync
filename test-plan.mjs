@@ -427,6 +427,26 @@ test('没有可加载入口的包 → 阻断（否则提升进 bundle 层会炸�
   assert.ok(plan.blockers.some((b) => b.code === 'no-loadable-entry' && b.package === 'src-only'))
 })
 
+test('git 源：必须给提醒、但绝不能阻断（它没有任何本地预检可做）', () => {
+  const src = path.join(tmp, 'g-src')
+  const tgt = path.join(tmp, 'g-tgt')
+  makeProfile(src, {
+    name: 'p-src',
+    dependencies: { 'git-only': 'github:wbb316/dsh-novel', 'from-registry': '^1.0.0' },
+    dsh: { profile: { bundles: [] } },
+  })
+  makeProfile(tgt, { name: 'p-tgt', dependencies: {}, dsh: { profile: { bundles: [] } } })
+  const plan = computePlan({ source: src, target: tgt })
+  // 不阻断：目标机的网络状况没法在计划阶段判定，判死会把本来能装的情况误拦
+  assert.equal(plan.ok, true, JSON.stringify(plan.blockers))
+  const hits = plan.warnings.filter((w) => w.code === 'git-source-needs-network')
+  assert.equal(hits.length, 1, '只该给 git 源那一个发提醒：' + JSON.stringify(plan.warnings))
+  assert.equal(hits[0].package, 'git-only')
+  assert.match(hits[0].message, /ERR_PNPM_GIT_RESOLVE_FAILED/, '要说清装不上时该看什么报错')
+  // 顺带钉住这条不变式：它确实是要被装的东西，不是被误报的
+  assert.ok(specsToInstall(plan).includes('github:wbb316/dsh-novel'))
+})
+
 // ── 勾选与 prune：破坏性动作不能碰「没勾中、也看不见」的东西 ──
 test('选择：勾选迁移不执行 prune —— extraInTarget 被清空并给出提醒', () => {
   const withExtra = {

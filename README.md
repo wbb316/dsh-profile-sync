@@ -188,7 +188,7 @@ bundle 新增 / allowBuilds 新增 / 阻断 / 提醒」的分项摘要。
 
 ## 预检会挡住什么
 
-装之前查这五件事（**官方 `dsh plugin add` 不查第 2、3 条**）：
+装之前查这六件事（**官方 `dsh plugin add` 不查第 2、3 条**）：
 
 1. **本机路径型 spec**：`link:` / `file:` 指的本机路径是否存在、类型对不对。
 2. **cordis entry id 撞车**：两个 bundle 插入同一个 loader entry id 时，
@@ -203,6 +203,16 @@ bundle 新增 / allowBuilds 新增 / 阻断 / 提醒」的分项摘要。
    并且**正确处理预发布号**（这个生态全是 `0.2.0-rc.2`；只比数字三元组会把
    `>=0.2.0-rc.3` 对着 `0.2.0-rc.2` 判成满足）。复合范围老实说「不认识」。
    权威判断交给官方通道。
+6. **git 源的目标机条件**（只提醒，不阻断）：`link:` / `file:` 能在**计划阶段**就查本机路径，
+   而 `git:` 源**没有任何本地检查可做**（`describeSpec` 只给 link / file 填
+   `localPath` / `localExists` / `localIsDir`）—— 装它要用目标机的 `git` 去 clone 远端，
+   既要 `git` 可执行、也要那条网络通路能通。实测过反例：同一台机器上
+   `git ls-remote` 成功拿到 HEAD sha，而 `pnpm add github:…` 报
+   `ERR_PNPM_GIT_RESOLVE_FAILED`（`schannel: failed to receive handshake`）——
+   **「git 自己能连」不等于「pnpm 调 git 能连」**。
+   所以它只出 `git-source-needs-network` 提醒、**不阻断**（目标机的网络状况没法在计划阶段
+   判定，判死会把本来能装的情况误拦）。根治办法是让源侧那个包也发到 registry，
+   把 `github:owner/repo` 换回版本号 —— 那之后这条依赖就只剩 registry 这一种形态了。
 
 ## 钉法不同 ≠ 版本变更
 
