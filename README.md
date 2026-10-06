@@ -211,8 +211,8 @@ bundle 新增 / allowBuilds 新增 / 阻断 / 提醒」的分项摘要。
    `ERR_PNPM_GIT_RESOLVE_FAILED`（`schannel: failed to receive handshake`）——
    **「git 自己能连」不等于「pnpm 调 git 能连」**。
    所以它只出 `git-source-needs-network` 提醒、**不阻断**（目标机的网络状况没法在计划阶段
-   判定，判死会把本来能装的情况误拦）。根治办法是让源侧那个包也发到 registry，
-   把 `github:owner/repo` 换回版本号 —— 那之后这条依赖就只剩 registry 这一种形态了。
+   判定，判死会把本来能装的情况误拦）。**提醒里会直接给出替代写法**：`github:owner/repo` 会被换算成对应的 tarball URL（`https://github.com/owner/repo/archive/refs/tags/<tag>.tar.gz`；源侧实际装出来的版本可读时 tag 直接填好），照抄到源侧那一行就能完全绕开 git —— pnpm 取 tarball 用**它自己的** HTTPS、不走 git 的传输层，而且**包名不变**，`dependencies` / `dsh.profile.bundles` 一个字都不用改。只报一句「注意网络」是没用的：那等于把一句看不懂的 pnpm 报错，换成一句看不懂的警告。
+   ⚠️ **别顺手把它改成普通版本号**：先确认 npm 上**同名包确实是你自己的**。名字被别人占用时（`dsh-novel` 就是活例子 —— npm 上那个 `0.1.1` 属于另一个仓库 `ddedook/dsh-novel`），写版本号会**装成别人的包**，那比装不上更糟。
 
 ## 钉法不同 ≠ 版本变更
 

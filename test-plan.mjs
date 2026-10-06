@@ -29,6 +29,7 @@ import {
   specKind,
   specsToInstall,
   summarizePatch,
+  tarballUrlHint,
 } from './lib/plan.js'
 
 let passed = 0
@@ -427,6 +428,32 @@ test('没有可加载入口的包 → 阻断（否则提升进 bundle 层会炸�
   assert.ok(plan.blockers.some((b) => b.code === 'no-loadable-entry' && b.package === 'src-only'))
 })
 
+test('tarballUrlHint：github 短形态 → 可直接粘贴的 tarball URL（不经过 git）', () => {
+  assert.equal(
+    tarballUrlHint('github:wbb316/dsh-novel', '0.13.0'),
+    'https://github.com/wbb316/dsh-novel/archive/refs/tags/v0.13.0.tar.gz',
+  )
+  // 完整 https 形态、带 .git 后缀、带 git+ 前缀都要认
+  assert.equal(
+    tarballUrlHint('git+https://github.com/o/r.git', null),
+    'https://github.com/o/r/archive/refs/tags/<tag>.tar.gz',
+  )
+  // spec 自己写了 ref 就用它，别拿版本号去猜
+  assert.equal(
+    tarballUrlHint('github:o/r#v1.2.3', '9.9.9'),
+    'https://github.com/o/r/archive/refs/tags/v1.2.3.tar.gz',
+  )
+  // `#semver:` 不是 tag —— 塞进 archive 路径会给出**错的** URL，所以退回版本号
+  assert.equal(
+    tarballUrlHint('github:o/r#semver:^1.0.0', '1.4.0'),
+    'https://github.com/o/r/archive/refs/tags/v1.4.0.tar.gz',
+  )
+  // 认不出来就不猜：GitLab / ssh / registry 一律 null（硬猜等于给出一条错的 URL）
+  assert.equal(tarballUrlHint('gitlab:o/r', '1.0.0'), null)
+  assert.equal(tarballUrlHint('git+ssh://git@github.com/o/r.git', '1.0.0'), null)
+  assert.equal(tarballUrlHint('^1.0.0', '1.0.0'), null)
+})
+
 test('git 源：必须给提醒、但绝不能阻断（它没有任何本地预检可做）', () => {
   const src = path.join(tmp, 'g-src')
   const tgt = path.join(tmp, 'g-tgt')
@@ -436,6 +463,16 @@ test('git 源：必须给提醒、但绝不能阻断（它没有任何本地预�
     dsh: { profile: { bundles: [] } },
   })
   makeProfile(tgt, { name: 'p-tgt', dependencies: {}, dsh: { profile: { bundles: [] } } })
+  // 源侧装出来了、版本可读 —— 提醒里的 tag 就应该被填好，而不是留占位符
+  const pkgDir = path.join(src, 'node_modules', 'git-only')
+  fs.mkdirSync(pkgDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(pkgDir, 'package.json'),
+    JSON.stringify({ name: 'git-only', version: '7.7.7', main: 'index.js' }),
+    'utf8',
+  )
+  fs.writeFileSync(path.join(pkgDir, 'index.js'), 'export default {}\n', 'utf8')
+
   const plan = computePlan({ source: src, target: tgt })
   // 不阻断：目标机的网络状况没法在计划阶段判定，判死会把本来能装的情况误拦
   assert.equal(plan.ok, true, JSON.stringify(plan.blockers))
@@ -443,6 +480,13 @@ test('git 源：必须给提醒、但绝不能阻断（它没有任何本地预�
   assert.equal(hits.length, 1, '只该给 git 源那一个发提醒：' + JSON.stringify(plan.warnings))
   assert.equal(hits[0].package, 'git-only')
   assert.match(hits[0].message, /ERR_PNPM_GIT_RESOLVE_FAILED/, '要说清装不上时该看什么报错')
+  // 关键：提醒必须**可粘贴**，不能只说「注意网络」。版本可读时 tag 要填好。
+  assert.ok(
+    hits[0].message.includes('https://github.com/wbb316/dsh-novel/archive/refs/tags/v7.7.7.tar.gz'),
+    '提醒里必须带上填好 tag 的 tarball URL：' + hits[0].message,
+  )
+  // 以及那个我差点自己踩的坑：改版本号之前先确认 npm 上同名包是不是自己的
+  assert.match(hits[0].message, /同名包/, '必须点明「被占用时会装成别人的包」')
   // 顺带钉住这条不变式：它确实是要被装的东西，不是被误报的
   assert.ok(specsToInstall(plan).includes('github:wbb316/dsh-novel'))
 })
